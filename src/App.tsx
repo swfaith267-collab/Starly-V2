@@ -5,9 +5,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, User, Sparkles, Heart, MessageCircle, ArrowRight, Settings, LogOut } from 'lucide-react';
+import { Send, User, Sparkles, Heart, MessageCircle, ArrowRight, Settings, LogOut, Bell, BellOff } from 'lucide-react';
 import { Message, UserProfile } from './types';
-import { getStarlyResponse } from './services/gemini';
+import { getStarlyResponse, getFollowUpMessage } from './services/gemini';
 
 export default function App() {
   const [isOnboarded, setIsOnboarded] = useState(false);
@@ -15,7 +15,9 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const followUpTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const savedProfile = localStorage.getItem('friendly_profile');
@@ -23,7 +25,65 @@ export default function App() {
       setUserProfile(JSON.parse(savedProfile));
       setIsOnboarded(true);
     }
+    
+    if (Notification.permission === 'granted') {
+      setNotificationsEnabled(true);
+    }
   }, []);
+
+  // Handle follow-up logic
+  useEffect(() => {
+    if (!isOnboarded || messages.length === 0) return;
+
+    // Clear existing timer
+    if (followUpTimerRef.current) {
+      clearTimeout(followUpTimerRef.current);
+    }
+
+    // Only set follow-up if the last message was from the user
+    // or if it's been a long time since the last message overall.
+    const lastMessage = messages[messages.length - 1];
+    
+    // Set a timer for a follow-up (e.g., 1 hour of inactivity)
+    // For demo/testing, let's use a shorter time if needed, but 1 hour feels "real"
+    const FOLLOW_UP_DELAY = 1000 * 60 * 60; // 1 hour
+
+    followUpTimerRef.current = setTimeout(async () => {
+      // Check if tab is hidden (user "hasn't touched the app")
+      if (document.hidden && notificationsEnabled) {
+        try {
+          const followUpText = await getFollowUpMessage(messages);
+          
+          // Show notification
+          new Notification("Starly", {
+            body: followUpText,
+            icon: "/favicon.ico" // Assuming there's an icon
+          });
+
+          // Add to messages so it's there when they return
+          const followUpMsg: Message = {
+            role: 'model',
+            text: followUpText,
+            timestamp: Date.now()
+          };
+          setMessages(prev => [...prev, followUpMsg]);
+        } catch (err) {
+          console.error("Follow-up failed", err);
+        }
+      }
+    }, FOLLOW_UP_DELAY);
+
+    return () => {
+      if (followUpTimerRef.current) clearTimeout(followUpTimerRef.current);
+    };
+  }, [messages, isOnboarded, notificationsEnabled]);
+
+  const requestNotificationPermission = async () => {
+    const permission = await Notification.requestPermission();
+    if (permission === 'granted') {
+      setNotificationsEnabled(true);
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -99,6 +159,8 @@ export default function App() {
             messagesEndRef={messagesEndRef}
             userProfile={userProfile}
             onReset={resetApp}
+            notificationsEnabled={notificationsEnabled}
+            requestNotificationPermission={requestNotificationPermission}
           />
         )}
       </AnimatePresence>
@@ -150,16 +212,25 @@ function Onboarding({ onComplete }: { onComplete: (profile: UserProfile) => void
       title: "One last thing.",
       subtitle: "How do you want Starly to talk to you?",
       content: (
-        <div className="space-y-4">
-          <p className="text-lg opacity-80">Any preferences? (e.g. 'Be extra direct', 'I'm spiritual', 'Keep it light')</p>
-          <input 
-            autoFocus
-            type="text" 
-            value={preferences} 
-            onChange={(e) => setPreferences(e.target.value)}
-            className="w-full bg-transparent border-b-2 border-[#5A5A40]/20 py-2 text-xl focus:border-[#5A5A40] outline-none transition-colors"
-            placeholder="Your preferences..."
-          />
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <p className="text-lg opacity-80">Any preferences? (e.g. 'Be extra direct', 'I'm spiritual')</p>
+            <input 
+              autoFocus
+              type="text" 
+              value={preferences} 
+              onChange={(e) => setPreferences(e.target.value)}
+              className="w-full bg-transparent border-b-2 border-[#5A5A40]/20 py-2 text-xl focus:border-[#5A5A40] outline-none transition-colors"
+              placeholder="Your preferences..."
+            />
+          </div>
+          <div className="p-4 bg-[#5A5A40]/5 rounded-2xl flex items-start gap-4">
+            <Bell className="w-6 h-6 text-[#5A5A40] mt-1" />
+            <div className="space-y-1">
+              <p className="font-medium">Best Friend Follow-ups</p>
+              <p className="text-sm opacity-60">Starly can check in on you if you've been away for a while. You can enable this via the bell icon in the chat.</p>
+            </div>
+          </div>
         </div>
       )
     }
@@ -209,7 +280,8 @@ function Onboarding({ onComplete }: { onComplete: (profile: UserProfile) => void
 }
 
 function ChatInterface({ 
-  messages, onSend, input, setInput, isLoading, messagesEndRef, userProfile, onReset 
+  messages, onSend, input, setInput, isLoading, messagesEndRef, userProfile, onReset,
+  notificationsEnabled, requestNotificationPermission
 }: { 
   messages: Message[], 
   onSend: () => void, 
@@ -219,6 +291,8 @@ function ChatInterface({
   messagesEndRef: React.RefObject<HTMLDivElement> | React.RefObject<null>,
   userProfile: UserProfile | null,
   onReset: () => void,
+  notificationsEnabled: boolean,
+  requestNotificationPermission: () => void,
   key?: React.Key
 }) {
   return (
@@ -234,13 +308,34 @@ function ChatInterface({
             <p className="text-xs uppercase tracking-widest opacity-40">Companion</p>
           </div>
         </div>
-        <button 
-          onClick={onReset}
-          className="p-2 hover:bg-[#5A5A40]/5 rounded-full transition-colors opacity-40 hover:opacity-100"
-          title="Reset Profile"
-        >
-          <LogOut className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          {notificationsEnabled && (
+            <button 
+              onClick={async () => {
+                const text = await getFollowUpMessage(messages);
+                new Notification("Starly (Test)", { body: text });
+              }}
+              className="p-2 text-[#5A5A40] opacity-40 hover:opacity-100 transition-colors"
+              title="Test Follow-up"
+            >
+              <Sparkles className="w-4 h-4" />
+            </button>
+          )}
+          <button 
+            onClick={requestNotificationPermission}
+            className={`p-2 rounded-full transition-colors ${notificationsEnabled ? 'text-[#5A5A40] opacity-100' : 'opacity-30 hover:opacity-60'}`}
+            title={notificationsEnabled ? "Notifications Active" : "Enable Follow-ups"}
+          >
+            {notificationsEnabled ? <Bell className="w-5 h-5" /> : <BellOff className="w-5 h-5" />}
+          </button>
+          <button 
+            onClick={onReset}
+            className="p-2 hover:bg-[#5A5A40]/5 rounded-full transition-colors opacity-40 hover:opacity-100"
+            title="Reset Profile"
+          >
+            <LogOut className="w-5 h-5" />
+          </button>
+        </div>
       </header>
 
       {/* Messages */}
