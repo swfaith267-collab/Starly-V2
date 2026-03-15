@@ -70,7 +70,7 @@ export async function* getStarlyResponseStream(history: Message[], profile: User
 
   try {
     const response = await ai.models.generateContentStream({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: contents,
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -125,7 +125,7 @@ export async function getStarlyResponse(history: Message[], profile: UserProfile
 
   try {
     const response: GenerateContentResponse = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: contents,
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -165,7 +165,7 @@ export async function generateConversationSummary(history: Message[], currentSum
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: [{ role: "user", parts: [{ text: prompt }] }],
     });
     return response.text || currentSummary || "";
@@ -192,7 +192,7 @@ export async function getFollowUpMessage(history: Message[]): Promise<string> {
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: contents,
     });
     return response.text || "Just checking in on what we talked about.";
@@ -227,7 +227,7 @@ export async function getScheduledCheckInMessage(history: Message[], profile: Us
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: contents,
     });
     return response.text || "Checking in.";
@@ -270,7 +270,7 @@ export async function getStarlyVoiceResponse(history: Message[], profile: UserPr
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
+      model: "gemini-1.5-flash",
       contents: contents,
       config: {
         responseModalities: [Modality.AUDIO],
@@ -300,7 +300,7 @@ export async function generateSpeech(text: string): Promise<string | null> {
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
+      model: "gemini-1.5-flash",
       contents: [{ parts: [{ text: `Say this in a warm, slow, and deeply human voice. Include natural stumbles, brief pauses, or a soft "um" if it helps the rhythm feel less like a machine and more like a person thinking. Take your time: ${text}` }] }],
       config: {
         responseModalities: [Modality.AUDIO],
