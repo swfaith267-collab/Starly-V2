@@ -17,10 +17,24 @@ export async function getStarlyResponse(history, profile) {
   });
 
   try {
-    const result = await model.generateContent({ contents });
+    const result = await model.generateContent({ 
+      contents,
+      safetySettings: [
+        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
+        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" }
+      ]
+    });
     return result.response.text();
-  } catch (e) { return "I hit a snag. Try again."; }
-}
+  } catch (e) { 
+    console.error(e);
+    const fallbacks = [
+      "Lost my train of thought. Say that again?",
+      "Something cut out on my end. Go on.",
+      "Missed that. I'm here though."
+    ];
+    return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+  }
 
 export async function* getStarlyResponseStream(h, p) { yield await getStarlyResponse(h, p); }
 export const generateConversationSummary = async (h, s) => s || "";
