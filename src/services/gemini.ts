@@ -35,6 +35,7 @@ export async function getStarlyResponse(history, profile) {
     ];
     return fallbacks[Math.floor(Math.random() * fallbacks.length)];
   }
+}
 
 export async function* getStarlyResponseStream(h, p) { yield await getStarlyResponse(h, p); }
 export const generateConversationSummary = async (h, s) => s || "";
