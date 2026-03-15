@@ -1,5 +1,5 @@
 {
   "name": "Friendly",
   "description": "A web-based AI therapy companion powered by Starly, a direct and warm AI personality.",
-  "requestFramePermissions": []
+  "requestFramePermissions": ["microphone"]
 }

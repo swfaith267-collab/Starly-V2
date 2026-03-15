@@ -5,9 +5,17 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, User, Sparkles, Heart, MessageCircle, ArrowRight, Settings, LogOut, Bell, BellOff, History, Plus, X, Trash2 } from 'lucide-react';
+import { Send, User, Sparkles, Heart, MessageCircle, ArrowRight, Settings, LogOut, Bell, BellOff, History, Plus, X, Trash2, Mic, MicOff, Share2, Check } from 'lucide-react';
 import { Message, UserProfile, Conversation } from './types';
-import { getStarlyResponse, getFollowUpMessage, generateConversationSummary } from './services/gemini';
+import { getStarlyResponse, getFollowUpMessage, generateConversationSummary, getScheduledCheckInMessage, generateSpeech, getStarlyResponseStream, getStarlyVoiceResponse } from './services/gemini';
+
+const getGreeting = (name: string) => {
+  const hour = new Date().getHours();
+  if (hour < 12) return `Hey ${name}. You up?`;
+  if (hour < 17) return `Hey ${name}. How's it going?`;
+  if (hour < 21) return `Hey ${name}. You okay?`;
+  return `Hey ${name}. Still awake?`;
+};
 
 export default function App() {
   const [isOnboarded, setIsOnboarded] = useState(false);
@@ -17,14 +25,200 @@ export default function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isCallMode, setIsCallMode] = useState(false);
+  const [showShareToast, setShowShareToast] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    const saved = localStorage.getItem('starly_notifications');
+    return saved === 'true';
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const followUpTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recognitionRef = useRef<any>(null);
+
+  const playBase64Audio = async (base64Data: string) => {
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+      const binaryString = window.atob(base64Data);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      const int16Array = new Int16Array(bytes.buffer);
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] / 32768;
+      }
+      
+      const buffer = audioContext.createBuffer(1, float32Array.length, 24000);
+      buffer.getChannelData(0).set(float32Array);
+      
+      const source = audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContext.destination);
+      source.start();
+    } catch (e) {
+      console.error("Audio playback error", e);
+    }
+  };
+
+  const speak = async (text: string) => {
+    if (!isCallMode) return;
+
+    try {
+      const base64Data = await generateSpeech(text);
+      if (base64Data) {
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        const binaryString = window.atob(base64Data);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        
+        // Assuming 16-bit PCM (standard for Gemini TTS)
+        const int16Array = new Int16Array(bytes.buffer);
+        const float32Array = new Float32Array(int16Array.length);
+        for (let i = 0; i < int16Array.length; i++) {
+          float32Array[i] = int16Array[i] / 32768;
+        }
+        
+        const buffer = audioContext.createBuffer(1, float32Array.length, 24000);
+        buffer.getChannelData(0).set(float32Array);
+        
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+        source.start();
+      } else {
+        // Fallback to browser TTS if Gemini TTS fails
+        if (!('speechSynthesis' in window)) return;
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        
+        const getVoices = () => {
+          const voices = window.speechSynthesis.getVoices();
+          const preferredVoice = voices.find(v => 
+            v.name.includes('Google UK English Female') || 
+            v.name.includes('Samantha') ||
+            (v.name.includes('Female') && v.lang.startsWith('en'))
+          ) || voices[0];
+          if (preferredVoice) utterance.voice = preferredVoice;
+        };
+
+        getVoices();
+        if (window.speechSynthesis.onvoiceschanged !== undefined) {
+          window.speechSynthesis.onvoiceschanged = getVoices;
+        }
+
+        utterance.pitch = 1.0;
+        utterance.rate = 0.85;
+        window.speechSynthesis.speak(utterance);
+      }
+    } catch (e) {
+      console.error("Speech playback error", e);
+    }
+  };
+
+  const toggleCallMode = () => {
+    if (isCallMode) {
+      if (recognitionRef.current) {
+        recognitionRef.current.onend = null;
+        recognitionRef.current.stop();
+      }
+      setIsRecording(false);
+      setIsCallMode(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    setIsCallMode(true);
+    startListening();
+  };
+
+  const startListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = () => {
+      setIsRecording(true);
+    };
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      handleSend(transcript);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event.error);
+      setIsRecording(false);
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+      // Auto-restart if still in call mode and not loading a response
+      if (isCallMode && !isLoading) {
+        setTimeout(() => {
+          if (isCallMode && !isLoading) startListening();
+        }, 300);
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch (e) {
+      console.error("Failed to start recognition", e);
+    }
+  };
 
   useEffect(() => {
     const savedProfile = localStorage.getItem('friendly_profile');
     if (savedProfile) {
-      const profile: UserProfile = JSON.parse(savedProfile);
+      let profile: UserProfile = JSON.parse(savedProfile);
+      
+      // Migration: Clean up old formal greetings from history
+      const oldGreetingSuffix = "I've been thinking about what you shared.";
+      
+      if (profile.conversations) {
+        let profileChanged = false;
+        const updatedConversations = profile.conversations.map(conv => {
+          const updatedMessages = conv.messages.map(msg => {
+            // Check for the old bot-like greeting
+            if (msg.role === 'model' && (msg.text.includes(oldGreetingSuffix) || msg.text.includes("There's no pressure to perform"))) {
+              profileChanged = true;
+              return { ...msg, text: getGreeting(profile.name) };
+            }
+            return msg;
+          });
+          return { ...conv, messages: updatedMessages };
+        });
+        
+        if (profileChanged) {
+          profile = { ...profile, conversations: updatedConversations };
+          localStorage.setItem('friendly_profile', JSON.stringify(profile));
+        }
+      }
+
       setUserProfile(profile);
       setIsOnboarded(true);
       
@@ -38,7 +232,7 @@ export default function App() {
         if (!hasWelcomed) {
           const welcomeMsg: Message = {
             role: 'model',
-            text: `Welcome back, ${profile.name}. I've been holding space for you. Let's continue where we left off.`,
+            text: getGreeting(profile.name),
             timestamp: Date.now()
           };
           setMessages([...lastConv.messages, welcomeMsg]);
@@ -51,8 +245,9 @@ export default function App() {
       }
     }
     
-    if (Notification.permission === 'granted') {
+    if (!localStorage.getItem('starly_notifications') && Notification.permission === 'granted') {
       setNotificationsEnabled(true);
+      localStorage.setItem('starly_notifications', 'true');
     }
   }, []);
 
@@ -79,7 +274,7 @@ export default function App() {
     const newId = Math.random().toString(36).substring(7);
     const initialGreeting: Message = {
       role: 'model',
-      text: `Hello ${profile.name}. I'm here. What's on your mind today?`,
+      text: getGreeting(profile.name),
       timestamp: Date.now()
     };
     
@@ -157,11 +352,109 @@ export default function App() {
     };
   }, [messages, isOnboarded, notificationsEnabled]);
 
+  // Scheduled Check-ins Logic
+  useEffect(() => {
+    if (!isOnboarded || !notificationsEnabled || !userProfile || !activeConversationId) return;
+
+    const checkScheduledMessages = async () => {
+      const now = new Date();
+      const hour = now.getHours();
+      const today = now.toISOString().split('T')[0];
+      
+      const lastMorning = localStorage.getItem('last_morning_checkin');
+      const lastNight = localStorage.getItem('last_night_checkin');
+      const lastDay = localStorage.getItem('last_day_checkin');
+      const lastDayTime = lastDay ? parseInt(lastDay) : 0;
+
+      let checkInType: 'morning' | 'night' | 'day' | null = null;
+
+      // Morning: 6-8am
+      if (hour >= 6 && hour < 9 && lastMorning !== today) {
+        checkInType = 'morning';
+      } 
+      // Night: 9-10pm
+      else if (hour >= 21 && hour < 23 && lastNight !== today) {
+        checkInType = 'night';
+      }
+      // Day: Every 4-6 hours (between 9am and 9pm)
+      else if (hour >= 9 && hour < 21) {
+        const hoursSinceLast = (now.getTime() - lastDayTime) / (1000 * 60 * 60);
+        if (hoursSinceLast >= 5) { // Average of 4-6 hours
+          checkInType = 'day';
+        }
+      }
+
+      if (checkInType) {
+        try {
+          const messageText = await getScheduledCheckInMessage(messages, userProfile, checkInType);
+          
+          // Show notification safely
+          if ('Notification' in window && Notification.permission === 'granted') {
+            try {
+              new Notification("Starly", { body: messageText });
+            } catch (e) {
+              console.warn("Could not fire system notification", e);
+            }
+          }
+
+          // Add to messages
+          const checkInMsg: Message = {
+            role: 'model',
+            text: messageText,
+            timestamp: Date.now()
+          };
+          
+          const updatedMessages = [...messages, checkInMsg];
+          setMessages(updatedMessages);
+
+          // Update storage to prevent double-firing
+          if (checkInType === 'morning') localStorage.setItem('last_morning_checkin', today);
+          if (checkInType === 'night') localStorage.setItem('last_night_checkin', today);
+          if (checkInType === 'day') localStorage.setItem('last_day_checkin', Date.now().toString());
+
+          // Persist to conversation
+          const updatedConversations = (userProfile.conversations || []).map(c => {
+            if (c.id === activeConversationId) {
+              return { ...c, messages: updatedMessages, timestamp: Date.now() };
+            }
+            return c;
+          });
+          const updatedProfile = { ...userProfile, conversations: updatedConversations };
+          setUserProfile(updatedProfile);
+          localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
+
+        } catch (err) {
+          console.error("Scheduled check-in failed", err);
+        }
+      }
+    };
+
+    // Check every minute
+    const interval = setInterval(checkScheduledMessages, 60000);
+    // Also check immediately on mount/update
+    checkScheduledMessages();
+
+    return () => clearInterval(interval);
+  }, [isOnboarded, notificationsEnabled, userProfile, messages, activeConversationId]);
+
   const requestNotificationPermission = async () => {
-    const permission = await Notification.requestPermission();
-    if (permission === 'granted') {
-      setNotificationsEnabled(true);
+    try {
+      if ('Notification' in window) {
+        const permission = await Notification.requestPermission();
+        if (permission === 'granted') {
+          setNotificationsEnabled(true);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn("Notification API not available or blocked in this context.");
     }
+    
+    // For the prototype: toggle anyway if browser blocks it, 
+    // so the user can still see the check-ins appearing in the chat.
+    const newState = !notificationsEnabled;
+    setNotificationsEnabled(newState);
+    localStorage.setItem('starly_notifications', newState.toString());
   };
 
   useEffect(() => {
@@ -172,7 +465,7 @@ export default function App() {
     const newId = Math.random().toString(36).substring(7);
     const initialGreeting: Message = {
       role: 'model',
-      text: `Hello ${profile.name}. I've been thinking about what you shared. I'm glad you're here. There's no pressure to perform or say the right thing. Just tell me what's actually happening for you right now.`,
+      text: getGreeting(profile.name),
       timestamp: Date.now()
     };
     
@@ -191,56 +484,107 @@ export default function App() {
     setIsOnboarded(true);
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || isLoading || !userProfile) return;
+  const handleSend = async (overrideInput?: string) => {
+    const textToSend = overrideInput || input;
+    if (!textToSend.trim() || isLoading || !userProfile) return;
 
     const userMessage: Message = {
       role: 'user',
-      text: input,
+      text: textToSend,
       timestamp: Date.now()
     };
 
     const newMessages = [...messages, userMessage];
     setMessages(newMessages);
-    setInput('');
+    if (!overrideInput) setInput('');
     setIsLoading(true);
 
     try {
-      const response = await getStarlyResponse(newMessages, userProfile);
-      const starlyMessage: Message = {
-        role: 'model',
-        text: response,
-        timestamp: Date.now()
-      };
-      const updatedMessages = [...newMessages, starlyMessage];
-      setMessages(updatedMessages);
-
-      // Update conversations in profile
-      const updatedConversations = (userProfile.conversations || []).map(c => {
-        if (c.id === activeConversationId) {
-          // Update title based on first user message if it's still "New Story"
-          let title = c.title;
-          if (title === "New Story" || title === "First Story") {
-            const firstUserMsg = updatedMessages.find(m => m.role === 'user');
-            if (firstUserMsg) {
-              title = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? "..." : "");
-            }
-          }
-          return { ...c, messages: updatedMessages, title, timestamp: Date.now() };
+      if (isCallMode) {
+        // Call Mode: Get text and audio together, but ONLY play audio
+        const { text, audioData } = await getStarlyVoiceResponse(newMessages, userProfile);
+        
+        const starlyMessage: Message = {
+          role: 'model',
+          text: text,
+          timestamp: Date.now()
+        };
+        
+        // We still add it to messages for context, but the Call UI won't show it
+        setMessages(prev => [...prev, starlyMessage]);
+        
+        if (audioData) {
+          await playBase64Audio(audioData);
+        } else {
+          await speak(text); // Fallback
         }
-        return c;
-      });
 
-      let updatedProfile = { ...userProfile, conversations: updatedConversations };
+        const updatedMessages = [...newMessages, starlyMessage];
+        // Update conversations in profile
+        const updatedConversations = (userProfile.conversations || []).map(c => {
+          if (c.id === activeConversationId) {
+            return { ...c, messages: updatedMessages, timestamp: Date.now() };
+          }
+          return c;
+        });
 
-      // Update summary every few turns
-      if (updatedMessages.length % 4 === 0) {
-        const newSummary = await generateConversationSummary(updatedMessages, userProfile.summary);
-        updatedProfile = { ...updatedProfile, summary: newSummary };
+        const updatedProfile = { ...userProfile, conversations: updatedConversations };
+        setUserProfile(updatedProfile);
+        localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
+        
+        // After speaking, restart listening if still in call mode
+        if (isCallMode) {
+          startListening();
+        }
+      } else {
+        // Standard Text Mode: Streaming text ONLY, no speech
+        let fullResponse = '';
+        const starlyMessage: Message = {
+          role: 'model',
+          text: '',
+          timestamp: Date.now()
+        };
+        
+        setMessages(prev => [...prev, starlyMessage]);
+        
+        const stream = getStarlyResponseStream(newMessages, userProfile, false);
+        
+        for await (const chunk of stream) {
+          fullResponse += chunk;
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { ...starlyMessage, text: fullResponse };
+            return updated;
+          });
+        }
+
+        const updatedMessages = [...newMessages, { ...starlyMessage, text: fullResponse }];
+
+        // Update conversations in profile
+        const updatedConversations = (userProfile.conversations || []).map(c => {
+          if (c.id === activeConversationId) {
+            let title = c.title;
+            if (title === "New Story" || title === "First Story") {
+              const firstUserMsg = updatedMessages.find(m => m.role === 'user');
+              if (firstUserMsg) {
+                title = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? "..." : "");
+              }
+            }
+            return { ...c, messages: updatedMessages, title, timestamp: Date.now() };
+          }
+          return c;
+        });
+
+        let updatedProfile = { ...userProfile, conversations: updatedConversations };
+
+        if (updatedMessages.length % 4 === 0) {
+          const newSummary = await generateConversationSummary(updatedMessages, userProfile.summary);
+          updatedProfile = { ...updatedProfile, summary: newSummary };
+        }
+
+        setUserProfile(updatedProfile);
+        localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
       }
-
-      setUserProfile(updatedProfile);
-      localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
     } catch (error) {
       const errorMessage: Message = {
         role: 'model',
@@ -260,6 +604,14 @@ export default function App() {
     setMessages([]);
     setActiveConversationId(null);
     setIsHistoryOpen(false);
+    setShowResetConfirm(false);
+  };
+
+  const handleShare = () => {
+    const sharedUrl = "https://ais-pre-qwplm2pxoo3ohdiwpfemmg-209068725449.europe-west1.run.app";
+    navigator.clipboard.writeText(sharedUrl);
+    setShowShareToast(true);
+    setTimeout(() => setShowShareToast(false), 2000);
   };
 
   return (
@@ -269,20 +621,37 @@ export default function App() {
           <Onboarding key="onboarding" onComplete={handleOnboarding} />
         ) : (
           <div className="relative h-screen">
-            <ChatInterface 
-              key="chat" 
-              messages={messages} 
-              onSend={handleSend} 
-              input={input} 
-              setInput={setInput} 
-              isLoading={isLoading}
-              messagesEndRef={messagesEndRef}
-              userProfile={userProfile}
-              onReset={resetApp}
-              notificationsEnabled={notificationsEnabled}
-              requestNotificationPermission={requestNotificationPermission}
-              onOpenHistory={() => setIsHistoryOpen(true)}
-            />
+            {isCallMode ? (
+              <CallScreen 
+                key="call"
+                isLoading={isLoading}
+                isRecording={isRecording}
+                onEndCall={toggleCallMode}
+                userProfile={userProfile}
+              />
+            ) : (
+              <ChatInterface 
+                key="chat" 
+                messages={messages} 
+                onSend={handleSend} 
+                input={input} 
+                setInput={setInput} 
+                isLoading={isLoading}
+                isRecording={isRecording}
+                onToggleCallMode={toggleCallMode}
+                isCallMode={isCallMode}
+                messagesEndRef={messagesEndRef}
+                userProfile={userProfile}
+                notificationsEnabled={notificationsEnabled}
+                requestNotificationPermission={requestNotificationPermission}
+                onOpenHistory={() => setIsHistoryOpen(true)}
+                onShare={handleShare}
+                showShareToast={showShareToast}
+                onReset={resetApp}
+                showResetConfirm={showResetConfirm}
+                setShowResetConfirm={setShowResetConfirm}
+              />
+            )}
             
             {/* History Sidebar */}
             <AnimatePresence>
@@ -467,21 +836,99 @@ function Onboarding({ onComplete }: { onComplete: (profile: UserProfile) => void
   );
 }
 
+function CallScreen({ 
+  isLoading, isRecording, onEndCall, userProfile 
+}: { 
+  isLoading: boolean, 
+  isRecording: boolean, 
+  onEndCall: () => void,
+  userProfile: UserProfile | null,
+  key?: string
+}) {
+  return (
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 bg-[#1A1A1A] z-50 flex flex-col items-center justify-center text-white p-6"
+    >
+      <div className="absolute top-12 text-center space-y-2">
+        <h2 className="text-2xl font-light tracking-widest uppercase opacity-60">Call with Starly</h2>
+        <p className="text-sm opacity-40 italic">"I'm listening, {userProfile?.name}."</p>
+      </div>
+
+      <div className="relative">
+        <motion.div 
+          animate={{ 
+            scale: isRecording ? [1, 1.1, 1] : 1,
+            opacity: isRecording ? [0.5, 0.8, 0.5] : 0.5
+          }}
+          transition={{ repeat: Infinity, duration: 2 }}
+          className="w-48 h-48 rounded-full bg-[#5A5A40] blur-3xl absolute inset-0 -z-10"
+        />
+        <div className="w-48 h-48 rounded-full bg-[#5A5A40] flex items-center justify-center shadow-2xl border border-white/10">
+          <Sparkles className={`w-20 h-20 text-white ${isLoading ? 'animate-pulse' : ''}`} />
+        </div>
+      </div>
+
+      <div className="mt-24 space-y-8 text-center">
+        <div className="h-8">
+          {isRecording && (
+            <motion.p 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-lg font-light tracking-wide text-emerald-400"
+            >
+              Listening...
+            </motion.p>
+          )}
+          {isLoading && (
+            <motion.p 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-lg font-light tracking-wide text-white/60"
+            >
+              Starly is thinking...
+            </motion.p>
+          )}
+        </div>
+
+        <button 
+          onClick={onEndCall}
+          className="p-8 bg-red-500 rounded-full hover:bg-red-600 transition-all shadow-xl shadow-red-900/20 group"
+        >
+          <MicOff className="w-8 h-8 group-hover:scale-110 transition-transform" />
+        </button>
+        <p className="text-xs uppercase tracking-[0.3em] opacity-30">Tap to end call</p>
+      </div>
+    </motion.div>
+  );
+}
+
 function ChatInterface({ 
-  messages, onSend, input, setInput, isLoading, messagesEndRef, userProfile, onReset,
-  notificationsEnabled, requestNotificationPermission, onOpenHistory
+  messages, onSend, input, setInput, isLoading, isRecording, onToggleCallMode, 
+  isCallMode, messagesEndRef, userProfile, onReset,
+  notificationsEnabled, requestNotificationPermission, onOpenHistory,
+  onShare, showShareToast, showResetConfirm, setShowResetConfirm
 }: { 
   messages: Message[], 
-  onSend: () => void, 
+  onSend: (override?: string) => void, 
   input: string, 
   setInput: (v: string) => void, 
   isLoading: boolean,
+  isRecording: boolean,
+  onToggleCallMode: () => void,
+  isCallMode: boolean,
   messagesEndRef: React.RefObject<HTMLDivElement> | React.RefObject<null>,
   userProfile: UserProfile | null,
   onReset: () => void,
   notificationsEnabled: boolean,
   requestNotificationPermission: () => void,
   onOpenHistory: () => void,
+  onShare: () => void,
+  showShareToast: boolean,
+  showResetConfirm: boolean,
+  setShowResetConfirm: (v: boolean) => void,
   key?: React.Key
 }) {
   return (
@@ -505,6 +952,25 @@ function ChatInterface({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button 
+            onClick={onShare}
+            className="p-2 hover:bg-[#5A5A40]/5 rounded-full transition-colors text-[#5A5A40] relative"
+            title="Share Starly"
+          >
+            {showShareToast ? <Check className="w-6 h-6 text-emerald-600" /> : <Share2 className="w-6 h-6" />}
+            <AnimatePresence>
+              {showShareToast && (
+                <motion.span 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-[10px] uppercase tracking-widest text-emerald-600 font-bold whitespace-nowrap"
+                >
+                  Copied!
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </button>
           {notificationsEnabled && (
             <button 
               onClick={async () => {
@@ -519,18 +985,56 @@ function ChatInterface({
           )}
           <button 
             onClick={requestNotificationPermission}
-            className={`p-2 rounded-full transition-colors ${notificationsEnabled ? 'text-[#5A5A40] opacity-100' : 'opacity-30 hover:opacity-60'}`}
+            className={`p-3 rounded-full transition-all duration-300 ${
+              notificationsEnabled 
+                ? 'text-[#5A5A40] bg-[#5A5A40]/10 shadow-inner' 
+                : 'text-[#5A5A40]/30 hover:bg-[#5A5A40]/5'
+            }`}
             title={notificationsEnabled ? "Notifications Active" : "Enable Follow-ups"}
           >
-            {notificationsEnabled ? <Bell className="w-5 h-5" /> : <BellOff className="w-5 h-5" />}
+            {notificationsEnabled ? <Bell className="w-6 h-6" /> : <BellOff className="w-6 h-6" />}
           </button>
-          <button 
-            onClick={onReset}
-            className="p-2 hover:bg-[#5A5A40]/5 rounded-full transition-colors opacity-40 hover:opacity-100"
-            title="Reset Profile"
-          >
-            <LogOut className="w-5 h-5" />
-          </button>
+          
+          <div className="relative">
+            <button 
+              onClick={() => setShowResetConfirm(!showResetConfirm)}
+              className={`p-2 rounded-full transition-all ${
+                showResetConfirm 
+                  ? 'bg-red-50 text-red-500 opacity-100' 
+                  : 'hover:bg-[#5A5A40]/5 text-[#5A5A40] opacity-60 hover:opacity-100'
+              }`}
+              title="Reset Profile"
+            >
+              <LogOut className="w-5 h-5" />
+            </button>
+            
+            <AnimatePresence>
+              {showResetConfirm && (
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                  className="absolute right-0 top-full mt-2 w-48 bg-white rounded-2xl shadow-xl border border-red-100 p-4 z-50"
+                >
+                  <p className="text-xs text-red-600 font-medium mb-3">This will delete all your stories. Are you sure?</p>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={onReset}
+                      className="flex-1 bg-red-500 text-white text-[10px] uppercase tracking-widest font-bold py-2 rounded-lg hover:bg-red-600 transition-colors"
+                    >
+                      Reset
+                    </button>
+                    <button 
+                      onClick={() => setShowResetConfirm(false)}
+                      className="flex-1 bg-gray-100 text-gray-500 text-[10px] uppercase tracking-widest font-bold py-2 rounded-lg hover:bg-gray-200 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
       </header>
 
@@ -573,30 +1077,44 @@ function ChatInterface({
 
       {/* Input */}
       <div className="p-6">
-        <div className="relative max-w-2xl mx-auto">
-          <textarea 
-            rows={1}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                onSend();
-              }
-            }}
-            placeholder="Speak your truth..."
-            className="w-full bg-white border border-[#5A5A40]/20 rounded-2xl py-4 pl-6 pr-16 text-lg focus:border-[#5A5A40] focus:ring-1 focus:ring-[#5A5A40] outline-none transition-all shadow-sm resize-none"
-          />
+        <div className="relative max-w-2xl mx-auto flex gap-3">
+          <div className="relative flex-1">
+            <textarea 
+              rows={1}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  onSend();
+                }
+              }}
+              placeholder="Speak your truth..."
+              className="w-full bg-white border border-[#5A5A40]/20 rounded-2xl py-4 pl-6 pr-16 text-lg focus:border-[#5A5A40] focus:ring-1 focus:ring-[#5A5A40] outline-none transition-all shadow-sm resize-none"
+            />
+            <button 
+              onClick={() => onSend()}
+              disabled={!input.trim() || isLoading}
+              className="absolute right-3 top-1/2 -translate-y-1/2 p-3 bg-[#5A5A40] text-white rounded-xl hover:bg-[#4a4a34] transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </div>
+          
           <button 
-            onClick={onSend}
-            disabled={!input.trim() || isLoading}
-            className="absolute right-3 top-1/2 -translate-y-1/2 p-3 bg-[#5A5A40] text-white rounded-xl hover:bg-[#4a4a34] transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            onClick={onToggleCallMode}
+            disabled={isLoading}
+            className={`relative p-4 rounded-2xl transition-all duration-300 ${
+              isCallMode 
+                ? 'bg-[#5A5A40] text-white shadow-lg' 
+                : 'bg-white border border-[#5A5A40]/20 text-[#5A5A40] hover:bg-[#5A5A40]/5 shadow-sm'
+            }`}
           >
-            <Send className="w-5 h-5" />
+            <Mic className="w-6 h-6" />
           </button>
         </div>
         <p className="text-center text-[10px] uppercase tracking-[0.2em] opacity-30 mt-4">
-          Starly is listening. Take your time.
+          {isRecording ? "Starly is listening..." : "Starly is here. Take your time."}
         </p>
       </div>
     </div>
