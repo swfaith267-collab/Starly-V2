@@ -5,14 +5,16 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, User, Sparkles, Heart, MessageCircle, ArrowRight, Settings, LogOut, Bell, BellOff } from 'lucide-react';
-import { Message, UserProfile } from './types';
-import { getStarlyResponse, getFollowUpMessage } from './services/gemini';
+import { Send, User, Sparkles, Heart, MessageCircle, ArrowRight, Settings, LogOut, Bell, BellOff, History, Plus, X, Trash2 } from 'lucide-react';
+import { Message, UserProfile, Conversation } from './types';
+import { getStarlyResponse, getFollowUpMessage, generateConversationSummary } from './services/gemini';
 
 export default function App() {
   const [isOnboarded, setIsOnboarded] = useState(false);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
@@ -22,14 +24,91 @@ export default function App() {
   useEffect(() => {
     const savedProfile = localStorage.getItem('friendly_profile');
     if (savedProfile) {
-      setUserProfile(JSON.parse(savedProfile));
+      const profile: UserProfile = JSON.parse(savedProfile);
+      setUserProfile(profile);
       setIsOnboarded(true);
+      
+      // Load most recent conversation or start a new one
+      if (profile.conversations && profile.conversations.length > 0) {
+        const lastConv = profile.conversations[0];
+        setActiveConversationId(lastConv.id);
+        
+        // Check if we should show a "Welcome back" message (first time this session)
+        const hasWelcomed = sessionStorage.getItem('starly_welcomed');
+        if (!hasWelcomed) {
+          const welcomeMsg: Message = {
+            role: 'model',
+            text: `Welcome back, ${profile.name}. I've been holding space for you. Let's continue where we left off.`,
+            timestamp: Date.now()
+          };
+          setMessages([...lastConv.messages, welcomeMsg]);
+          sessionStorage.setItem('starly_welcomed', 'true');
+        } else {
+          setMessages(lastConv.messages);
+        }
+      } else {
+        startNewConversation(profile);
+      }
     }
     
     if (Notification.permission === 'granted') {
       setNotificationsEnabled(true);
     }
   }, []);
+
+  const deleteConversation = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!userProfile || !userProfile.conversations) return;
+    
+    const updatedConversations = userProfile.conversations.filter(c => c.id !== id);
+    const updatedProfile = { ...userProfile, conversations: updatedConversations };
+    
+    setUserProfile(updatedProfile);
+    localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
+    
+    if (activeConversationId === id) {
+      if (updatedConversations.length > 0) {
+        switchConversation(updatedConversations[0].id);
+      } else {
+        startNewConversation(updatedProfile);
+      }
+    }
+  };
+
+  const startNewConversation = (profile: UserProfile) => {
+    const newId = Math.random().toString(36).substring(7);
+    const initialGreeting: Message = {
+      role: 'model',
+      text: `Hello ${profile.name}. I'm here. What's on your mind today?`,
+      timestamp: Date.now()
+    };
+    
+    const newConv: Conversation = {
+      id: newId,
+      title: "New Story",
+      messages: [initialGreeting],
+      timestamp: Date.now()
+    };
+
+    const updatedConversations = [newConv, ...(profile.conversations || [])];
+    const updatedProfile = { ...profile, conversations: updatedConversations };
+    
+    setUserProfile(updatedProfile);
+    setMessages([initialGreeting]);
+    setActiveConversationId(newId);
+    localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
+    setIsHistoryOpen(false);
+  };
+
+  const switchConversation = (id: string) => {
+    if (!userProfile || !userProfile.conversations) return;
+    const conv = userProfile.conversations.find(c => c.id === id);
+    if (conv) {
+      setActiveConversationId(id);
+      setMessages(conv.messages);
+      setIsHistoryOpen(false);
+    }
+  };
 
   // Handle follow-up logic
   useEffect(() => {
@@ -90,21 +169,30 @@ export default function App() {
   }, [messages]);
 
   const handleOnboarding = (profile: UserProfile) => {
-    setUserProfile(profile);
-    localStorage.setItem('friendly_profile', JSON.stringify(profile));
-    setIsOnboarded(true);
-    
-    // Initial greeting from Starly
+    const newId = Math.random().toString(36).substring(7);
     const initialGreeting: Message = {
       role: 'model',
       text: `Hello ${profile.name}. I've been thinking about what you shared. I'm glad you're here. There's no pressure to perform or say the right thing. Just tell me what's actually happening for you right now.`,
       timestamp: Date.now()
     };
+    
+    const initialConv: Conversation = {
+      id: newId,
+      title: "First Story",
+      messages: [initialGreeting],
+      timestamp: Date.now()
+    };
+
+    const updatedProfile = { ...profile, conversations: [initialConv] };
+    setUserProfile(updatedProfile);
+    localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
     setMessages([initialGreeting]);
+    setActiveConversationId(newId);
+    setIsOnboarded(true);
   };
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() || isLoading || !userProfile) return;
 
     const userMessage: Message = {
       role: 'user',
@@ -112,18 +200,47 @@ export default function App() {
       timestamp: Date.now()
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
     setInput('');
     setIsLoading(true);
 
     try {
-      const response = await getStarlyResponse([...messages, userMessage]);
+      const response = await getStarlyResponse(newMessages, userProfile);
       const starlyMessage: Message = {
         role: 'model',
         text: response,
         timestamp: Date.now()
       };
-      setMessages(prev => [...prev, starlyMessage]);
+      const updatedMessages = [...newMessages, starlyMessage];
+      setMessages(updatedMessages);
+
+      // Update conversations in profile
+      const updatedConversations = (userProfile.conversations || []).map(c => {
+        if (c.id === activeConversationId) {
+          // Update title based on first user message if it's still "New Story"
+          let title = c.title;
+          if (title === "New Story" || title === "First Story") {
+            const firstUserMsg = updatedMessages.find(m => m.role === 'user');
+            if (firstUserMsg) {
+              title = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? "..." : "");
+            }
+          }
+          return { ...c, messages: updatedMessages, title, timestamp: Date.now() };
+        }
+        return c;
+      });
+
+      let updatedProfile = { ...userProfile, conversations: updatedConversations };
+
+      // Update summary every few turns
+      if (updatedMessages.length % 4 === 0) {
+        const newSummary = await generateConversationSummary(updatedMessages, userProfile.summary);
+        updatedProfile = { ...updatedProfile, summary: newSummary };
+      }
+
+      setUserProfile(updatedProfile);
+      localStorage.setItem('friendly_profile', JSON.stringify(updatedProfile));
     } catch (error) {
       const errorMessage: Message = {
         role: 'model',
@@ -141,27 +258,98 @@ export default function App() {
     setIsOnboarded(false);
     setUserProfile(null);
     setMessages([]);
+    setActiveConversationId(null);
+    setIsHistoryOpen(false);
   };
 
   return (
-    <div className="min-h-screen bg-[#fdfcf8] text-[#3c3c3c] font-serif selection:bg-[#e9e4d1]">
+    <div className="min-h-screen bg-[#fdfcf8] text-[#3c3c3c] font-serif selection:bg-[#e9e4d1] overflow-hidden">
       <AnimatePresence mode="wait">
         {!isOnboarded ? (
           <Onboarding key="onboarding" onComplete={handleOnboarding} />
         ) : (
-          <ChatInterface 
-            key="chat" 
-            messages={messages} 
-            onSend={handleSend} 
-            input={input} 
-            setInput={setInput} 
-            isLoading={isLoading}
-            messagesEndRef={messagesEndRef}
-            userProfile={userProfile}
-            onReset={resetApp}
-            notificationsEnabled={notificationsEnabled}
-            requestNotificationPermission={requestNotificationPermission}
-          />
+          <div className="relative h-screen">
+            <ChatInterface 
+              key="chat" 
+              messages={messages} 
+              onSend={handleSend} 
+              input={input} 
+              setInput={setInput} 
+              isLoading={isLoading}
+              messagesEndRef={messagesEndRef}
+              userProfile={userProfile}
+              onReset={resetApp}
+              notificationsEnabled={notificationsEnabled}
+              requestNotificationPermission={requestNotificationPermission}
+              onOpenHistory={() => setIsHistoryOpen(true)}
+            />
+            
+            {/* History Sidebar */}
+            <AnimatePresence>
+              {isHistoryOpen && (
+                <>
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    onClick={() => setIsHistoryOpen(false)}
+                    className="absolute inset-0 bg-black/20 backdrop-blur-sm z-40"
+                  />
+                  <motion.div 
+                    initial={{ x: '-100%' }}
+                    animate={{ x: 0 }}
+                    exit={{ x: '-100%' }}
+                    transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+                    className="absolute inset-y-0 left-0 w-80 bg-[#fdfcf8] shadow-2xl z-50 flex flex-col border-r border-[#5A5A40]/10"
+                  >
+                    <div className="p-6 border-b border-[#5A5A40]/10 flex justify-between items-center">
+                      <h3 className="text-xl font-medium text-[#5A5A40]">Your Stories</h3>
+                      <button onClick={() => setIsHistoryOpen(false)} className="p-2 hover:bg-[#5A5A40]/5 rounded-full">
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                    
+                    <div className="p-4">
+                      <button 
+                        onClick={() => startNewConversation(userProfile!)}
+                        className="w-full flex items-center justify-center gap-2 bg-[#5A5A40] text-white py-3 rounded-xl hover:bg-[#4a4a34] transition-all mb-6"
+                      >
+                        <Plus className="w-5 h-5" />
+                        New Story
+                      </button>
+                      
+                      <div className="space-y-2 overflow-y-auto max-h-[calc(100vh-200px)] scrollbar-hide">
+                        {userProfile?.conversations?.map((conv) => (
+                          <div key={conv.id} className="relative group">
+                            <button
+                              onClick={() => switchConversation(conv.id)}
+                              className={`w-full text-left p-4 rounded-2xl transition-all pr-12 ${
+                                activeConversationId === conv.id 
+                                  ? 'bg-[#5A5A40]/10 border border-[#5A5A40]/20' 
+                                  : 'hover:bg-[#5A5A40]/5 border border-transparent'
+                              }`}
+                            >
+                              <p className="font-medium text-sm truncate">{conv.title}</p>
+                              <p className="text-[10px] uppercase tracking-widest opacity-40 mt-1">
+                                {new Date(conv.timestamp).toLocaleDateString()}
+                              </p>
+                            </button>
+                            <button 
+                              onClick={(e) => deleteConversation(conv.id, e)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-red-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 rounded-full transition-all"
+                              title="Delete Story"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
+          </div>
         )}
       </AnimatePresence>
     </div>
@@ -281,7 +469,7 @@ function Onboarding({ onComplete }: { onComplete: (profile: UserProfile) => void
 
 function ChatInterface({ 
   messages, onSend, input, setInput, isLoading, messagesEndRef, userProfile, onReset,
-  notificationsEnabled, requestNotificationPermission
+  notificationsEnabled, requestNotificationPermission, onOpenHistory
 }: { 
   messages: Message[], 
   onSend: () => void, 
@@ -293,6 +481,7 @@ function ChatInterface({
   onReset: () => void,
   notificationsEnabled: boolean,
   requestNotificationPermission: () => void,
+  onOpenHistory: () => void,
   key?: React.Key
 }) {
   return (
@@ -300,6 +489,13 @@ function ChatInterface({
       {/* Header */}
       <header className="px-6 py-8 flex justify-between items-center border-b border-[#5A5A40]/5">
         <div className="flex items-center gap-3">
+          <button 
+            onClick={onOpenHistory}
+            className="p-2 hover:bg-[#5A5A40]/5 rounded-full transition-colors text-[#5A5A40]"
+            title="History"
+          >
+            <History className="w-6 h-6" />
+          </button>
           <div className="w-10 h-10 rounded-full bg-[#5A5A40] flex items-center justify-center text-white">
             <Sparkles className="w-5 h-5" />
           </div>

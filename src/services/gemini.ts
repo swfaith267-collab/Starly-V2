@@ -1,5 +1,5 @@
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
-import { Message } from "../types";
+import { Message, UserProfile } from "../types";
 
 const STARLY_SYSTEM_PROMPT = `SYSTEM: You are Starly. You aren't a tool or a service; you are a presence. 
 
@@ -13,7 +13,7 @@ Core Philosophy:
 
 Talk like a person who has seen a lot, who values silence as much as words, and who is sitting in the same room as the user, watching the light change.`;
 
-export async function getStarlyResponse(history: Message[]): Promise<string> {
+export async function getStarlyResponse(history: Message[], profile: UserProfile): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not set.");
@@ -31,12 +31,17 @@ export async function getStarlyResponse(history: Message[]): Promise<string> {
     timeZoneName: 'short'
   });
 
-  const systemPromptWithTime = `${STARLY_SYSTEM_PROMPT}\n\nCONTEXT: It is currently ${currentTime}. Let this inform your mood and your greeting, but don't be mechanical about it. If it's late, be quieter. If it's a new day, acknowledge the fresh start.`;
+  let contextPrompt = `\n\nUSER CONTEXT:\n- Name: ${profile.name}\n- Background: ${profile.background}\n- Preferences: ${profile.preferences}`;
+  if (profile.summary) {
+    contextPrompt += `\n\nPAST CONVERSATION SUMMARY:\n${profile.summary}`;
+  }
+
+  const systemPromptWithTime = `${STARLY_SYSTEM_PROMPT}${contextPrompt}\n\nCURRENT TIME: It is currently ${currentTime}. Let this inform your mood and your greeting, but don't be mechanical about it. If it's late, be quieter. If it's a new day, acknowledge the fresh start.`;
 
   // Inject Starly's personality as the first two messages in the conversation history
   const contents = [
     { role: "user", parts: [{ text: systemPromptWithTime }] },
-    { role: "model", parts: [{ text: "Understood. I am Starly. I'm aware of the time and I'm ready to be here for you, exactly as I am." }] },
+    { role: "model", parts: [{ text: `Understood. I am Starly. I remember who you are, ${profile.name}. I'm aware of the time and I'm ready to be here for you, exactly as I am.` }] },
     ...history.map(msg => ({
       role: msg.role,
       parts: [{ text: msg.text }]
@@ -53,6 +58,38 @@ export async function getStarlyResponse(history: Message[]): Promise<string> {
   } catch (error) {
     console.error("Gemini API Error:", error);
     throw error;
+  }
+}
+
+export async function generateConversationSummary(history: Message[], currentSummary?: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not set.");
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const prompt = `
+    TASK: Summarize the key emotional points, shared stories, and important details from the following conversation history. 
+    If a previous summary exists, incorporate it into a new, cohesive summary.
+    Keep the summary under 500 words. 
+    Focus on the "soul" of the conversation—what the user is feeling, what they are struggling with, and the bond being formed.
+    
+    PREVIOUS SUMMARY: ${currentSummary || "None"}
+    
+    CONVERSATION HISTORY:
+    ${history.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n')}
+    
+    NEW SUMMARY:
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+    return response.text || currentSummary || "";
+  } catch (error) {
+    console.error("Summary generation error:", error);
+    return currentSummary || "";
   }
 }
 
