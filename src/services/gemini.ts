@@ -72,9 +72,6 @@ export async function* getStarlyResponseStream(history: Message[], profile: User
     const response = await ai.models.generateContentStream({
       model: "gemini-1.5-flash",
       contents: contents,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
-      }
     });
 
     for await (const chunk of response) {
@@ -127,9 +124,6 @@ export async function getStarlyResponse(history: Message[], profile: UserProfile
     const response: GenerateContentResponse = await ai.models.generateContent({
       model: "gemini-1.5-flash",
       contents: contents,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
-      }
     });
 
     return response.text || "I'm sorry, I'm having trouble finding the words right now.";
