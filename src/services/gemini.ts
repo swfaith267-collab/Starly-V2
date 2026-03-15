@@ -59,11 +59,11 @@ export async function* getStarlyResponseStream(history: Message[], profile: User
     systemPromptWithTime += "\n\nVOICE MODE ACTIVE: Respond like a friend on a call. Keep it very brief—maximum 2 sentences. Be direct, warm, and concise.";
   }
 
+  
   const contents = [
     { role: "user", parts: [{ text: systemPromptWithTime }] },
-    { role: "model", parts: [{ text: `Hey ${profile.name}. I'm here. Let's just talk.` }] },
     ...history.map(msg => ({
-      role: msg.role,
+      role: msg.role === 'assistant' ? 'model' : msg.role,
       parts: [{ text: msg.text }]
     }))
   ];
@@ -111,11 +111,10 @@ export async function getStarlyResponse(history: Message[], profile: UserProfile
   const systemPromptWithTime = `${STARLY_SYSTEM_PROMPT}${contextPrompt}\n\nCURRENT TIME: It is currently ${currentTime}. Let this inform your mood, but keep it brief. STRICT: Maximum 3 sentences.`;
 
   // Inject Starly's personality as the first two messages in the conversation history
-  const contents = [
+const contents = [
     { role: "user", parts: [{ text: systemPromptWithTime }] },
-    { role: "model", parts: [{ text: `Hey ${profile.name}. I'm here. Let's just talk.` }] },
     ...history.map(msg => ({
-      role: msg.role,
+      role: msg.role === 'assistant' ? 'model' : msg.role,
       parts: [{ text: msg.text }]
     }))
   ];
