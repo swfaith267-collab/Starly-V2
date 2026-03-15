@@ -1,4 +1,4 @@
-import { GoogleGenAI, GenerateContentResponse, Modality, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, GenerateContentResponse, Modality } from "@google/genai";
 import { Message, UserProfile } from "../types";
 
 const STARLY_SYSTEM_PROMPT = `SYSTEM: You are Starly. A presence, not a tool.
