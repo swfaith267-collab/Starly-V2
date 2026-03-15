@@ -254,9 +254,8 @@ export async function getStarlyVoiceResponse(history: Message[], profile: UserPr
 
   const contents = [
     { role: "user", parts: [{ text: systemPromptWithTime }] },
-    { role: "model", parts: [{ text: `Hey ${profile.name}. I'm here. Let's just talk.` }] },
     ...history.map(msg => ({
-      role: msg.role,
+      role: msg.role === 'assistant' ? 'model' : msg.role,
       parts: [{ text: msg.text }]
     }))
   ];
@@ -264,15 +263,7 @@ export async function getStarlyVoiceResponse(history: Message[], profile: UserPr
   try {
     const response = await ai.models.generateContent({
       model: "gemini-1.5-flash",
-      contents: contents,
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Kore' },
-          },
-        },
-      },
+      contents: contents
     });
 
     const text = response.text || "";
